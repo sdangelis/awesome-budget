@@ -1,9 +1,5 @@
-
-import streamlit as st
 import sqlite3
-import requests
-from passlib.hash import argon2
-from uuid import uuid4
+
 
 def create_tables(connection):
   c = connection.cursor()  
@@ -14,7 +10,7 @@ def create_tables(connection):
   c.execute("""
   CREATE TABLE IF NOT EXISTS users
   (id INTEGER, enduser_id BLOB NOT NULL UNIQUE, reference BLOB NOT NULL UNIQUE, 
-  username TEXT,password TEXT, PRIMARY KEY(id))
+  username TEXT,password TEXT, requsition_id TEXT, PRIMARY KEY(id))
   """)
   c.execute("""CREATE TABLE IF NOT EXISTS categories
   (id INTEGER, category TEXT, PRIMARY KEY(id))

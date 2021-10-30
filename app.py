@@ -16,28 +16,27 @@ if 'name' not in st.session_state:
     st.session_state.name = None
 if "enduser_id" not in st.session_state:
     st.session_state.enduser_id = None
-if "reference" not in st.session_state:
-    st.session_state.reference = None
-# In theory this should really be a CONSTANT.
 if "token" not in st.session_state:
     st.session_state.token = None
 if "id" not in st.session_state:
-  st.session_state.id = None
+    st.session_state.id = None
+
+# Set up redirection
+params = st.experimental_get_query_params()  
+params
+if params:
+  st.session_state.name = params["n"]
+  st.session_state.id = params["rid"]
 
 
 # import api token 
-TOKEN = environ.get("NG_TOKEN")
 SECRETS = (environ.get("NG_ID"),environ.get("NG_KEY") )
 
 if not SECRETS:
   st.error("API KEY NOT FOUND, THIS IS A SYSTEM ERROR")
   st.stop()
-  
-# connect DB 
-conn = sqlite3.connect("awesomebudget.db",  check_same_thread=False)
-create_tables(conn)
 
-@st.cache
+
 def get_token(secrets):
   """
   Get token
@@ -56,7 +55,20 @@ def get_token(secrets):
   json = json )
   return res.json()
 
-st.session_state.token = (get_token(SECRETS)["access"])
+if st.session_state.token == None:
+  st.session_state.token = (get_token(SECRETS)["access"])
+
+# Set up redirection
+params = st.experimental_get_query_params()  
+params
+if params:
+  st.session_state.name = params["n"][0]
+  st.session_state.id = params["rid"][0].split("=")[1]
+
+
+# connect DB 
+conn = sqlite3.connect("awesomebudget.db",  check_same_thread=False)
+create_tables(conn)
 
 st.title("Awesome Budget \U0001F680 \U0001F4B0")
 
@@ -75,7 +87,7 @@ def register(connection, username, password):
         return st.error(f"User: {user} has been already registered")
     else:
         try: 
-            c.execute("INSERT INTO users (enduser_id, reference, username, password) VALUES(?,?,?,?)",
+            c.execute("INSERT INTO users (enduser_id, username, password) VALUES(?,?,?,?)",
                               (uuid4().bytes_le,uuid4().bytes_le,username, argon2.hash(password)))
             connection.commit()
             st.success(f"User: {user} registred successfully ")
@@ -94,7 +106,6 @@ def login(connection, username, password):
         return st.error("wrong username ") 
     if argon2.verify(password, query[0][4]):
         st.session_state.enduser_id = UUID(bytes_le = query[0][1])
-        st.session_state.reference = UUID(bytes_le = query[0][2])
         st.session_state.name = query[0][3]
         return st.success("Logged in successfully")
     else:
@@ -102,7 +113,6 @@ def login(connection, username, password):
 
 def logout():
   st.session_state.enduser_id = None
-  st.session_state.reference = None
   st.session_state.name = None
   st.session_state.token = None
   st.session_state.id = None
@@ -148,9 +158,10 @@ def build_link(token, institution_id):
   inputs: Nordigen token (str),institution_id  
   returns: the link needed to  
   """
+
   json = {
     "institution_id" : institution_id, 
-    "redirect" : "http://localhost:8501"
+    "redirect" : f"http://localhost:8501/?n={st.session_state.name}&id={st.session_state.id}"
     }
   res = requests.post('https://ob.nordigen.com/api/v2/requisitions/',
   headers ={'Authorization': "Bearer " + token, 'accept' : 'application/json', 'Content-Type': 'application/json'}, 
@@ -162,7 +173,21 @@ def build_link(token, institution_id):
   return st.info(f"Please go to the link {res.json()['link']} to autorize your bank")
 
 
+@st.cache
+def list_accounts(token, id):
+  res = requests.get(f'https://ob.nordigen.com/api/v2/requisitions/{id}/', 
+            headers={'accept' : 'application/json', 'Authorization': "Bearer " + token })
+  print(res.json())
+  return pd.DataFrame.from_dict(res.json()) 
+
 # If the user is logged in, run the rest of app
+
+@st.cache
+def get_transasctions(token,id):
+  res = requests.get(f'https://ob.nordigen.com/api/v2/accounts/{id}/transactions', 
+            headers={'accept' : 'application/json', 'Authorization': "Bearer " + token })
+  print(res.json())
+  return res.json()
 
 if st.session_state.name:
   
@@ -174,10 +199,15 @@ if st.session_state.name:
   bank = st.selectbox("choose your bank or financial provider", list(banks))
   print(providers[(providers.countries == country) & (providers.name == bank)].id.to_list()[0])
   
-  # At the moment this step is stuck here. 
-  # need to find a way to create unique 
+  #      
   st.button("connect your bank", on_click=build_link, args=(st.session_state.token, 
     providers[(providers.countries == country) & (providers.name == bank)].id.to_list()[0])
   )
 
-  
+  st.button("connect the sandbox bank (RECCOMENDED)", on_click=build_link, args=(st.session_state.token, "SANDBOXFINANCE_SFIN0000" )
+  )
+  accounts = list_accounts(st.session_state.token, st.session_state.id)
+  for account in accounts.accounts: 
+    raw_transactions = get_transasctions(st.session_state.token, account)
+    transactions = pd.json_normalize(raw_transactions["transactions"]["booked"])
+    transactions

@@ -1,33 +1,40 @@
+from re import L
 from matplotlib import pyplot
+import numpy as np
 from numpy import ceil
 from numpy.core.numeric import ones_like
 import pandas as pd
 from requests.exceptions import RequestsDependencyWarning
 import streamlit as st
 import requests
-from helpers import create_tables
 from os import environ
 import sqlite3
 from passlib.hash import argon2
 from uuid import uuid4, UUID
+import json
+import copy
+from functools import partial
 
-# initialise user state 
-if 'name' not in st.session_state:
-    st.session_state.name = None
-if "enduser_id" not in st.session_state:
-    st.session_state.enduser_id = None
-if "token" not in st.session_state:
-    st.session_state.token = None
-if "id" not in st.session_state:
-    st.session_state.id = None
 
-# Set up redirection
+# Load modules as needed
+
+from db import *
+from helpers import *
+
+# what is going on? 
+
+initialise_state()
+
+"Debug feature"
+st.session_state
+
+logged = False
+# get paramters from URL
 params = st.experimental_get_query_params()  
-params
 if params:
-  st.session_state.name = params["n"]
-  st.session_state.id = params["rid"]
-
+  st.session_state.name = params["n"][0]
+  st.session_state.salt = params["salt"][0]
+params
 
 # import api token 
 SECRETS = (environ.get("NG_ID"),environ.get("NG_KEY") )
@@ -36,88 +43,14 @@ if not SECRETS:
   st.error("API KEY NOT FOUND, THIS IS A SYSTEM ERROR")
   st.stop()
 
-
-def get_token(secrets):
-  """
-  Get token
-  input:
-  returns: the json request 
-  TO-DO: need to find a way to capture if token is expired and in that 
-  case ask for renewal. Need to add token and expiry date to databse.
-  issue here is should the token be unencrypted? 
-  could encript it with the secrets as key as to keep everything safe
-  As in theory secrets should only be accessible in RAM (bash history disagrees) 
-  """
-  json = {'secret_id' : secrets[0], 'secret_key' : secrets[1], 
-    }
-  res = requests.post('https://ob.nordigen.com/api/v2/token/new/',
-  headers={'accept' : 'application/json', 'Content-Type': 'application/json'}, 
-  json = json )
-  return res.json()
-
 if st.session_state.token == None:
   st.session_state.token = (get_token(SECRETS)["access"])
-
-# Set up redirection
-params = st.experimental_get_query_params()  
-params
-if params:
-  st.session_state.name = params["n"][0]
-  st.session_state.id = params["rid"][0].split("=")[1]
-
 
 # connect DB 
 conn = sqlite3.connect("awesomebudget.db",  check_same_thread=False)
 create_tables(conn)
 
 st.title("Awesome Budget \U0001F680 \U0001F4B0")
-
-
-# autentication functions
-
-def register(connection, username, password):
-    """
-    registers a user to the SQLite databse in the connection 
-    returns a streamlit error if the username is already taken
-    """
-    c = connection.cursor()
-    query = c.execute("SELECT * FROM users WHERE username = ?",(username,))
-    query = c.fetchall()
-    if query:
-        return st.error(f"User: {user} has been already registered")
-    else:
-        try: 
-            c.execute("INSERT INTO users (enduser_id, username, password) VALUES(?,?,?,?)",
-                              (uuid4().bytes_le,uuid4().bytes_le,username, argon2.hash(password)))
-            connection.commit()
-            st.success(f"User: {user} registred successfully ")
-            return 
-        except sqlite3.IntegrityError:
-            return st.error("Something has gone wrong, Please try again")
-
-def login(connection, username, password):
-    """
-    logs user in if the password matches SQLite record in the connection
-    """
-    c = connection.cursor()
-    query = c.execute("SELECT * FROM users WHERE username = ?",(username,))
-    query = c.fetchall()
-    if not query:
-        return st.error("wrong username ") 
-    if argon2.verify(password, query[0][4]):
-        st.session_state.enduser_id = UUID(bytes_le = query[0][1])
-        st.session_state.name = query[0][3]
-        return st.success("Logged in successfully")
-    else:
-        return st.error("wrong password")
-
-def logout():
-  st.session_state.enduser_id = None
-  st.session_state.name = None
-  st.session_state.token = None
-  st.session_state.id = None
-
-logged = None
 
 # if the user is not logged in, allow user to log in or register
 if not st.session_state.name:
@@ -137,77 +70,140 @@ if not st.session_state.name:
 if st.session_state.name:
   st.subheader(f"Welcome {st.session_state.name}!")
   st.button(label='logout',on_click=logout)
+  st.session_state.fernet = generate_fernet(st.session_state.salt, st.session_state.token)
 
-@st.cache
-def get_providers(token, country):
-  """
-  queries the nordigen API for compatible banks
-  input: token(str?), 2-letter uppercase ISO code for a country (str)
-  returns exploded pd data frame with compatible financial insitutions
-  """
-  res = requests.get('https://ob.nordigen.com/api/v2/institutions', 
-            headers={'accept' : 'application/json', 'Authorization': "Bearer " + token }, 
-            params={"country" : country})
-  df = pd.DataFrame.from_dict(res.json()) 
-  return df.explode("countries", ignore_index=False)
+  # loading your accounts should happen automatically
+  for requisition in load_requisitions(conn, st.session_state.name):
+    for account in list_accounts(st.session_state.token, requisition)["accounts"]:
+      st.session_state.accounts.add(account)
+    
+  if st.session_state.accounts:
+    with st.expander("Your accounts:"):
+      st.write(st.session_state.accounts)
 
-def build_link(token, institution_id):
-  """
-  creates a Nordigen requisition and link for the specified institution
-  stores autorisation id in the session_state.id variable
-  inputs: Nordigen token (str),institution_id  
-  returns: the link needed to  
-  """
+  with st.expander("add a new provider:"):
+    country = st.selectbox('Pick your country', ["GB", "IT", "ES", "IE"])
+    providers = get_providers(st.session_state.token, country)
 
-  json = {
-    "institution_id" : institution_id, 
-    "redirect" : f"http://localhost:8501/?n={st.session_state.name}&id={st.session_state.id}"
-    }
-  res = requests.post('https://ob.nordigen.com/api/v2/requisitions/',
-  headers ={'Authorization': "Bearer " + token, 'accept' : 'application/json', 'Content-Type': 'application/json'}, 
-  json = json)
-  print(res.json())
-  if not res.ok:
-    return st.error("Sorry, something went wrong")
-  st.session_state.id = res.json()["id"]
-  return st.info(f"Please go to the link {res.json()['link']} to autorize your bank")
+    banks = providers[providers['countries'] == country].name
+    bank = st.selectbox("choose your bank or financial provider", list(banks))
 
-
-@st.cache
-def list_accounts(token, id):
-  res = requests.get(f'https://ob.nordigen.com/api/v2/requisitions/{id}/', 
-            headers={'accept' : 'application/json', 'Authorization': "Bearer " + token })
-  print(res.json())
-  return pd.DataFrame.from_dict(res.json()) 
-
-# If the user is logged in, run the rest of app
-
-@st.cache
-def get_transasctions(token,id):
-  res = requests.get(f'https://ob.nordigen.com/api/v2/accounts/{id}/transactions', 
-            headers={'accept' : 'application/json', 'Authorization': "Bearer " + token })
-  print(res.json())
-  return res.json()
-
-if st.session_state.name:
-  
-  country = st.selectbox('Pick your country', ["GB"])
-  providers = get_providers(st.session_state.token, country)
-
-  banks = providers[providers['countries'] == country].name
-
-  bank = st.selectbox("choose your bank or financial provider", list(banks))
-  print(providers[(providers.countries == country) & (providers.name == bank)].id.to_list()[0])
-  
-  #      
-  st.button("connect your bank", on_click=build_link, args=(st.session_state.token, 
-    providers[(providers.countries == country) & (providers.name == bank)].id.to_list()[0])
+    st.button("connect your bank", on_click = build_link, args = (st.session_state.token, 
+    providers[(providers.countries == country) & (providers.name == bank)].id.to_list()[0], conn, st.session_state.name)
   )
+    st.button("connect the sandbox bank (RECOMMENDED)",
+      on_click = build_link, args = (st.session_state.token, "SANDBOXFINANCE_SFIN0000", conn, st.session_state.name)
+    )
 
-  st.button("connect the sandbox bank (RECCOMENDED)", on_click=build_link, args=(st.session_state.token, "SANDBOXFINANCE_SFIN0000" )
-  )
-  accounts = list_accounts(st.session_state.token, st.session_state.id)
-  for account in accounts.accounts: 
-    raw_transactions = get_transasctions(st.session_state.token, account)
-    transactions = pd.json_normalize(raw_transactions["transactions"]["booked"])
-    transactions
+
+  st.header("your budget")
+
+  # are the SQL categories up to date 
+  validate_categories(conn, categories)
+  # Load User Budget
+  
+
+  """
+  NEED TO REWORK THIS TO SET WHETHER YOU ARE SETTING THE BUDGET 
+  AND WHETHER YOU HAVE UNSUCCESSFULLY LOADED THE BUDGET
+  """
+  if st.session_state.obj:
+    pass
+  elif not st.session_state.budget:
+    st.session_state.obj = st.button("Load your budget", on_click=load_budget, args = (conn, st.session_state.name)) 
+  else:
+    st.session_state.obj = st.button("Set a Budget", key = None)
+
+  if st.session_state.obj:
+    st.session_state.income = st.session_state.avail = st.number_input("what is your monthly income?", 0, step = 1)
+    "your monthly income is " + str(st.session_state.avail)
+
+    for category in categories:
+      if category == "Other":
+        amount = st.number_input(f"{category}",min_value = 0, value = st.session_state.avail, max_value = st.session_state.avail, step = 1, key = None)
+      elif category in ["Refunds", "Salary"]:
+        continue
+      else:
+        amount = st.number_input(f"{category}", min_value = 0, max_value = st.session_state.avail, step = 1, key = None)
+      st.session_state.budget.update({category : amount})
+      st.session_state.avail -= amount
+    st.button("Save budget", on_click = save_budget, args = (st.session_state.budget, conn, st.session_state.name, categories))
+    st.button("reset budget")
+    st.button("reload budget")
+  # Display budget to user 
+  budget = pd.DataFrame.from_dict(st.session_state.budget, orient = "index", columns = ["Amount"])
+  
+  def func(pct, allvals):
+    absolute = int(pct / 100. * np.sum(allvals))
+    return "{:.1f}%\n({:d})".format(pct, absolute)
+
+  budget.index.names = ['Category']
+  budget.rename(columns={"index" : "amount"}, inplace=True)
+  budget = budget[budget['Amount'] > 0]
+  budget.sort_values("Category")
+
+  if not budget.empty:
+    budget
+    plot = budget.plot.pie(y='Amount', figsize=(5, 10), subplots=False,  legend = False, autopct=lambda p: func(p,budget.iloc[:].values)).figure
+    plot.legend(loc='center left', bbox_to_anchor=(1.0, 0.5)).figure
+
+  st.header("Your Transactions")  
+  
+
+  def wrap_transactions(ids):
+    with st.spinner("Loading transactions, Please wait"):
+      for id in ids:
+        st.session_state.transactions.update({id : get_transasctions(st.session_state.token, id, datetime.datetime.today().strftime('%Y-%m-%d'))})
+      return True
+
+  st.session_state.accounts
+  st.button("Load Your Transactions", 
+    on_click = wrap_transactions,
+    args = (st.session_state.accounts,))
+  
+  transactions = []
+  if st.session_state.transactions:  
+
+    for account in st.session_state.transactions:
+      frame = pd.json_normalize(st.session_state.transactions[account]["transactions"]["booked"])
+      frame.rename(columns = {
+        'bankTransactionCode': 'Type',
+        "bookingDate" : "Date",
+        "debtorName" : "Destination",
+        "transactionAmount.amount" : "Amount",
+        "remittanceInformationUnstructured" : "Info",
+        "categorisation.categoryTitle" : "Category"
+        },
+        inplace=True
+      )
+      transactions.append(frame)
+    for data in transactions: 
+      st.dataframe(data[['Type', "Date", "Amount", "Category", "Destination", "Info"]], width=4000)
+
+  if transactions:
+    st.header("Your Spending and income")
+    transactions = pd.concat(transactions)
+    transactions["Amount"] = pd.to_numeric(transactions["Amount"], )
+    income = transactions[transactions["Amount"] > 0][["Amount", "Category"]] 
+    losses = transactions[transactions["Amount"] < 0][["Amount", "Category"]] 
+
+    
+    st.subheader("your income")
+    income = income.groupby("Category").agg({"Amount":"sum"})
+    income 
+    st.subheader("your spending")
+    losses = losses.groupby("Category").agg({"Amount":"sum"})
+    losses
+    st.header("Tips")
+
+    #draw_tips()
+
+  # For now this is disabled
+  if False:
+    # get transactions
+    with st.spinner('Loading transactions - This might take some time'):
+      for account in accounts.accounts: 
+        raw_transactions = get_transasctions(st.session_state.token, account)
+        transactions = pd.json_normalize(raw_transactions["transactions"]["booked"])
+        st.dataframe(transactions)
+    st.success("Transactions successfully loaded")

@@ -1,3 +1,7 @@
+"""
+Functions to register and autenticate users
+"""
+
 import sqlite3
 from os import path, urandom
 from uuid import uuid4
@@ -22,7 +26,7 @@ class AlreadyRegistredError(Exception):
 
 def create_tables(db):
     """
-    If not already present, creates all table and indices in the provided sqlite3 db 
+    If not already present, creates all table and indices in the provided sqlite3 db
     returns True if successfull
     """
     with sqlite3.connect(db) as conn:
@@ -31,7 +35,7 @@ def create_tables(db):
             """
         CREATE TABLE IF NOT EXISTS users
         (id INTEGER, user_id BLOB NOT NULL UNIQUE,
-        username TEXT NOT NULL UNIQUE, password TEXT, 
+        username TEXT NOT NULL UNIQUE, password TEXT,
         salt BLOB NOT NULL UNIQUE, PRIMARY KEY(id))
     """
         )
@@ -86,7 +90,7 @@ def register(
     :param password: password to register in the db
     :param db: path to sqlite db, defaults to path.join(".db", "awesomebudget.db")
     :returns : True if succesful
-    :raises AlreadyRegistredError: if a given username is already present in the DB 
+    :raises AlreadyRegistredError: if a given username is already present in the DB
     :raises sqlite3.IntegrityError: if there's erorrs with Sqlite data integrity
     """
     with sqlite3.connect(db) as conn:
@@ -98,8 +102,8 @@ def register(
         try:
             c.execute(
                 """
-                    INSERT INTO users 
-                    (user_id, username, password, salt) VALUES(?,?,?,?)
+                    INSERT INTO users
+                     (user_id, username, password, salt) VALUES(?,?,?,?)
                 """,
                 (uuid4().bytes_le, username, argon2.hash(password), urandom(16),),
             )

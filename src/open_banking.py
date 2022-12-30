@@ -1,5 +1,6 @@
 """
 Functions to deal with Nordigen Open Banking APIs
+Includes token encryption/decryption.
 """
 
 import base64
@@ -28,15 +29,15 @@ class InvalidEndpointError(Exception):
 
 def generate_fernet(salt: bytes, password: str) -> Fernet:
     """
-  Generates a Fernet cypher from a given salt and password
+    Generates a Fernet cypher from a given salt and password
 
-  :param salt: a fixed salt
-  :param password: password to use
-  :returns: The Fernet cypherwith base64 url
+    :param salt: a fixed salt
+    :param password: password to use
+    :returns: The Fernet cypherwith base64 url
 
-  :Note: This function is deterministic so should always
-  return the same cypher from the same salt and password (at least on the same machine)
-  """
+    :note: This function is deterministic so should always
+    return the same cypher from the same salt and password
+    """
     kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=390000)
     return Fernet(
         base64.urlsafe_b64encode(kdf.derive(bytes(password, encoding="utf8")))
@@ -92,14 +93,6 @@ def save_token(
     with sqlite3.connect(db, detect_types=sqlite3.PARSE_DECLTYPES) as conn:
         c = conn.cursor()
         c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS tokens (id INTEGER NOT NULL UNIQUE,
-             access BLOB NOT NULL, access_expires TIMESTAMP NOT NULL, refresh BLOB,
-            refresh_expires TIMESTAMP, PRIMARY KEY(id))
-        """
-        )
-
-        c.execute(
             """REPLACE INTO tokens(id, access, access_expires, refresh, refresh_expires)
             VALUES(?,?,?,?,?)""",
             (
@@ -110,7 +103,7 @@ def save_token(
                 token["refresh_expires"],
             ),
         )
-        c.commit()
+        conn.commit()
         return True
 
 
@@ -187,24 +180,32 @@ def get_providers(token: str, country: str) -> pd.DataFrame:
     """
     res = requests.get(
         "https://ob.nordigen.com/api/v2/institutions",
-        headers={"accept": "application/json", "Authorization": "Bearer " + token},
+        headers={
+            "accept": "application/json",
+            "Authorization": "Bearer " + token["access"],
+        },
         params={"country": country},
     )
+    if res.status_code != 200:
+        raise RuntimeError(res.json())
     df = pd.DataFrame.from_dict(res.json())
-    return df.explode("countries", ignore_index=False)
-
-
-# save requisition
+    return df.set_index("name").drop(
+        columns=["bic", "transaction_total_days", "countries", "logo"]
+    )
 
 
 def save_requisition(
-    username: str, requision_id: str, db: path = path.join(".db", "awesomebudget.db")
+    username: str,
+    requisition_id: str,
+    expiry_date: datetime,
+    db: path = path.join(".db", "awesomebudget.db"),
 ):
     """
     Saves a requisition to db
 
     :param username: username associated with the given requisition
-    :parm requision_id: ID of the requisition to insert in db
+    :param requisition_id: ID of the requisition to insert in db
+    :param expiry_date: requisition expiry date
     :param db: path to sqlite db, defaults to path.join(".db", "awesomebudget.db")
     :returns: True if successful
     """
@@ -216,14 +217,13 @@ def save_requisition(
 
         # insert requisition
         c.execute(
-            """INSERT INTO  requisitions(users_id, requisition_id) VALUES(?,?)""",
-            (user_id, requision_id),
+            "INSERT INTO requisitions(users_id, requisition_id, expiry) VALUES(?,?,?)",
+            (user_id, requisition_id, expiry_date),
         )
-        c.commit()
+        conn.commit()
         return True
 
 
-# load requisition
 def load_requisitions(
     username: str, db: path = path.join(".db", "awesomebudget.db")
 ) -> tuple:
@@ -247,45 +247,43 @@ def load_requisitions(
         return query
 
 
-# delete requisition
 def delete_requision(
     token: str,
     username: str,
     requisition_id: str,
     db: path = path.join(".db", "awesomebudget.db"),
+    local_only: bool = False,
 ) -> bool:
     """
     Delets a requisition
 
     :param token: Nordigen API token
     :param username: username associated with the requisition to delete
-    :param requisition_id: Id for the requisition to delete
+    :param requisition_id: id for the requisition to delete
     :param db: path to sqlite db, defaults to path.join(".db", "awesomebudget.db")
+    :parm local_only: Whether to delete only from local db rather than Nordigen's API
     :return: true
     :raises ValueError: if the cancellatkon tokens or requisitions are not valid
     """
     # delete from Nordigen backend
-    json = {id: requisition_id}
-    res = requests.delete(
-        "https://ob.nordigen.com/api/v2/requisitions/",
-        headers={
-            "Authorization": "Bearer " + token["access"],
-            "accept": "application/json",
-            "Content-Type": "application/json",
-        },
-        json=json,
-    )
-    if not res.ok:
-        raise ValueError("invalid requisition ID or token")
-    else:
-        # if successful delete from db too
-        with sqlite3.connect(db, detect_types=sqlite3.PARSE_DECLTYPES) as conn:
-            c = conn.cursor()
-            c.execute(
-                """DELETE from requisitions
-                WHERE users_id IN (SELECT user_id from users where username = ?)""",
-                (username),
-            )
+    if not local_only:
+        res = requests.delete(
+            f"https://ob.nordigen.com/api/v2/requisitions/{requisition_id}/",
+            headers={
+                "Authorization": "Bearer " + token["access"],
+                "accept": "application/json",
+                "Content-Type": "application/json",
+            },
+        )
+        if not res.ok:
+            raise ValueError("invalid requisition ID or token")
+    with sqlite3.connect(db) as conn:
+        c = conn.cursor()
+        c.execute(
+            """DELETE from requisitions
+                WHERE users_id IN (SELECT user_id from users WHERE username = (?))""",
+            (username,),
+        )
     return True
 
 
@@ -305,8 +303,6 @@ def create_requisition(
     :returns: Nordigen URL for customer onboarding
     :raise ValueError: For now when token is expired
     """
-    if datetime.now() < token["token_expires"]:
-        raise ValueError("expired token")
     json = {
         "institution_id": institution_id,
         "redirect": f"http://localhost:8501/?token={token['access']}",
@@ -320,5 +316,157 @@ def create_requisition(
         },
         json=json,
     )
-    save_requisition(username, res.json()["id"], db)
+    created_at = datetime.strptime(res.json()["created"], "%Y-%m-%dT%H:%M:%S.%f%z")
+    requisition = {
+        "username": username,
+        "requisition_id": res.json()["id"],
+        "expiry_date": created_at + timedelta(days=90),
+        "db": db,
+    }
+    save_requisition(**requisition)
     return f"Please go to the link {res.json()['link']} to autorize your bank"
+
+
+def save_account(
+    account_id: str,
+    requisition_id: str,
+    db: path = path.join(".db", "awesomebudget.db"),
+):
+    """
+    Saves the selected account into the DB
+
+    :param account_id: Nordigen id for the account to save
+    :param requisition_id: Nordigen id for requisition associated with the accounts
+    :param db: path to sqlite db, defaults to path.join(".db", "awesomebudget.db")
+    :return: True if saved successfully
+    """
+    with sqlite3.connect(db) as conn:
+        c = conn.cursor()
+        c.execute(
+            """INSERT INTO accounts(account_id, requisition_id) values
+        (?, (SELECT id FROM requisitions WHERE requisition_id = (?)))""",
+            (account_id, requisition_id),
+        )
+        conn.commit()
+    return True
+
+
+def load_accounts(username: str, db: path = path.join(".db", "awesomebudget.db")):
+    """
+    Loads all accounts for the given user
+
+    :param username: username to retireve accounts for
+    :param db: path to sqlite db, defaults to path.join(".db", "awesomebudget.db")
+    :return: list of DB rows
+    """
+    with sqlite3.connect(db) as conn:
+        c = conn.cursor()
+        c.execute(
+            """
+        SELECT * FROM accounts WHERE user_id IN (
+            SELECT id FROM users WHERE username = (?))
+        """,
+            (username,),
+        )
+        return c.fetchall()
+
+
+def get_accounts(token: dict, requisition_id: str) -> dict:
+    """
+    Gets all accounts associated with a given requisition
+
+    :paramn token: Nordigen API token
+    :param requisition_id: requisition_id of the requisition to query
+    :returns: A dict with the accounts associated with the requisition
+    """
+    res = requests.get(
+        f"https://ob.nordigen.com/api/v2/requisitions/{requisition_id}/",
+        headers={
+            "accept": "application/json",
+            "Authorization": "Bearer " + token["access"],
+        },
+    )
+
+    accounts = {"requisition_id": res.json()["id"], "ids": res.json()["accounts"]}
+    return accounts
+
+
+def get_transasctions(token: dict, account_id: str):
+    """
+    Get transactions for a given account
+
+    :param token: Nordigen API token
+    :param account_id: Nordigen account ID to get transactions for
+    :returns: A dict with transactions as per NORDIGEN Schema
+    """
+    res = requests.get(
+        f"https://ob.nordigen.com/api/v2/accounts/{account_id}/transactions",
+        headers={
+            "accept": "application/json",
+            "Authorization": "Bearer " + token["access"],
+        },
+    )
+    return _normalise_transactions(res.json())
+
+
+def get_balance(token: dict, account_id: str) -> pd.DataFrame:
+    """Get balance for a given account
+
+    :param token: Nordigen API token
+    :param account_id: Nordigen account ID to get transactions for
+    :returns: A normalised df with balances
+    """
+    res = requests.get(
+        f"https://ob.nordigen.com/api/v2/accounts/{account_id}/balances",
+        headers={
+            "accept": "application/json",
+            "Authorization": "Bearer " + token["access"],
+        },
+    )
+    # Return normalised DF
+    return (
+        pd.json_normalize(res.json()["balances"])
+        .rename(columns=lambda x: str.replace(x, ".", "_"))
+        .assign(
+            referenceDate=lambda x: pd.to_datetime(x["referenceDate"]),
+            balanceAmount_amount=lambda x: pd.to_numeric(x["balanceAmount_amount"]),
+        )
+        .set_index("referenceDate")
+    )
+
+
+def get_account_data(token: dict, account_id: str) -> dict:
+    """TBD"""
+    data = {
+        "balance": get_balance(token, account_id),
+        "transactions": get_transasctions(token, account_id),
+        "last_updated": datetime.now(),
+    }
+    return data
+
+
+def _normalise_transactions(transactions: dict) -> pd.DataFrame:
+    """
+    Normalise transactions from json
+
+    :param transactions: transaction Json object from Nordigen APIs
+    :return: a normalised pd DataFrame object
+    with booked and pending transactions in a status column
+    """
+    tables = map(
+        lambda x: pd.json_normalize(transactions["transactions"][x]).assign(status=x),
+        ["pending", "booked"],
+    )
+    table = (
+        pd.concat(tables)
+        .rename(columns=lambda x: str.replace(x, ".", "_"))
+        .assign(
+            valueDate=lambda x: pd.to_datetime(x["valueDate"]),
+            bookingDate=lambda x: pd.to_datetime(x["bookingDate"]),
+            transactionAmount_amount=lambda x: pd.to_numeric(
+                x["transactionAmount_amount"]
+            ),
+        )
+        .convert_dtypes()
+    )
+    return table

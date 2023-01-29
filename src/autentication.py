@@ -34,24 +34,23 @@ def login(
         c = conn.cursor()
         query = c.execute("SELECT * FROM users WHERE username = ?", (username,))
         query = c.fetchone()
-        print(query)
         if not query:
-            raise AuthenticationError
+            raise AuthenticationError("Wrong username or password")
         if argon2.verify(password, query[3]):
-            return query
-        raise AuthenticationError
+            return query[0], query[2]
+        raise AuthenticationError("Wrong username or password")
 
 
 def register(
     username: str, password: str, db: path = path.join(".db", "awesomebudget.db")
-) -> bool:
+) -> None:
     """
     registers a user to the SQLite db
 
     :param username: username to register in the db
     :param password: password to register in the db
     :param db: path to sqlite db, defaults to path.join(".db", "awesomebudget.db")
-    :returns : True if succesful
+    :returns : None if succesful
     :raises AlreadyRegistredError: if a given username is already present in the DB
     :raises sqlite3.IntegrityError: if there's erorrs with Sqlite data integrity
     """
@@ -60,7 +59,7 @@ def register(
         query = c.execute("SELECT * FROM users WHERE username = ?", (username,))
         query = c.fetchall()
         if query:
-            return AlreadyRegistredError(username)
+            return AlreadyRegistredError(f"{username} is already registred")
         try:
             c.execute(
                 """
@@ -69,20 +68,27 @@ def register(
                 """,
                 (uuid4().bytes_le, username, argon2.hash(password), urandom(16),),
             )
-            return True
+            return None
         except sqlite3.IntegrityError as e:
             raise sqlite3.IntegrityError("Something has gone wrong") from e
 
 
 def deregister(
     username: str, password: str, db: path = path.join(".db", "awesomebudget.db")
-) -> bool:
+) -> None:
     """not implemented"""
+
+    with sqlite3.connect(db) as conn:
+        c = conn.cursor()
+        query = c.execute(
+            """
+        RETURN Names"""
+        )
     raise NotImplementedError
 
 
 def update_password(
     username: str, password: str, db: path = path.join(".db", "awesomebudget.db")
-) -> bool:
+) -> None:
     """not implemented"""
     raise NotImplementedError

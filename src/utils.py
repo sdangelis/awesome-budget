@@ -18,7 +18,7 @@ def create_tables(db: path = path.join(".db", "awesomebudget.db")):
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS users
-            (id INTEGER, user_id BLOB NOT NULL UNIQUE,
+            (id INTEGER, user_id TEXT NOT NULL UNIQUE,
             username TEXT NOT NULL UNIQUE, password TEXT,
             salt BLOB NOT NULL UNIQUE, PRIMARY KEY(id))
             """
@@ -27,21 +27,21 @@ def create_tables(db: path = path.join(".db", "awesomebudget.db")):
             """CREATE TABLE IF NOT EXISTS requisitions
             (id INTEGER NOT NULL UNIQUE, users_id INTEGER NOT NULL, requisition_id TEXT,
             expiry TIMESTAMP NOT NULL,
-            PRIMARY KEY(id), FOREIGN KEY(users_id) REFERENCES users(id));
+            PRIMARY KEY(id), FOREIGN KEY(users_id) REFERENCES users(id) ON DELETE CASCADE);
             """
         )
         c.execute(
             """CREATE TABLE IF NOT EXISTS accounts
             (id INTEGER NOT NULL UNIQUE, account_id NOT NULL UNIQUE,
             requisition_id INTEGER NOT NULL UNIQUE,
-            PRIMARY KEY(id), FOREIGN KEY(requisition_id) REFERENCES requisitions(id));
+            PRIMARY KEY(id), FOREIGN KEY(requisition_id) REFERENCES requisitions(id)) ON DELETE CASCADEs;
             """
         )
         c.execute(
             """CREATE TABLE IF NOT EXISTS balance
             (id INTEGER NOT NULL, account_id NOT NULL, balance INTEGER,
             last_checked TIMESTAMP NOT NULL,
-            PRIMARY KEY(id), FOREIGN KEY(account_id) REFERENCES accounts(id))
+            PRIMARY KEY(id), FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE)
             """
         )
         c.execute(
@@ -53,7 +53,7 @@ def create_tables(db: path = path.join(".db", "awesomebudget.db")):
             """CREATE TABLE IF NOT EXISTS budget
             (id INTEGER, users_id INTEGER, categories_id INTEGER, amount NUMERIC,
             PRIMARY KEY(id), FOREIGN KEY (categories_id) REFERENCES categories(id),
-            FOREIGN KEY(users_id) REFERENCES users(id))
+            FOREIGN KEY(users_id) REFERENCES users(id) ON DELETE CASCADE)
             """
         )
         c.execute(
